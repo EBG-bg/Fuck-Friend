@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 1,
+	"id": "fuck_friends",
+	"version": "${version}",
+	"name": "Fuck Friends",
+	"description": "Limit TP and Deaths for friends.",
+	"authors": [
+		"Cline"
+	],
+	"contact": {},
+	"license": "MIT",
+	"icon": "assets/fuck_friends/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.fuck_friends.FuckFriends"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.2",
+		"minecraft": "~1.21",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
