@@ -5,10 +5,9 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
-import com.mojang.brigadier.tree.CommandNode;
+import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
 import net.minecraft.commands.Commands;
-import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.coordinates.Vec3Argument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -16,28 +15,33 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.GameType;
 
-import java.lang.reflect.Field;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class FuckFriends implements ModInitializer {
 
     public static final Map<UUID, Integer> tpCounts = new HashMap<>();
     public static final Map<UUID, Integer> deathCounts = new HashMap<>();
 
+    // 匹配 Xaero 跨维度发出的指令: "execute in minecraft:the_nether run tp @s 1 2 3"
+    private static final Pattern EXECUTE_TP_PATTERN = Pattern.compile("^execute\\s+in\\s+([a-zA-Z0-9_:]+)\\s+run\\s+(?:tp|teleport)\\s+@s\\s+([-\\d.]+)\\s+([-\\d.]+)\\s+([-\\d.]+)$");
+    // 匹配常规的小地图同维度传送: "tp @s 1 2 3"
+    private static final Pattern NORMAL_TP_PATTERN = Pattern.compile("^(?:tp|teleport)\\s+@s\\s+([-\\d.]+)\\s+([-\\d.]+)\\s+([-\\d.]+)$");
+
     @Override
     public void onInitialize() {
         FuckFriendsConfig.loadConfig();
 
-        // 针对小地图的特殊处理：原版即使解锁了 /tp 命令，也会在参数解析底层（EntitySelectorParser）
-        // 强行拦截非 OP 玩家使用任何 '@' 开头的选择器（包括 @s）。
-        // 因此我们手动为 /tp 注册一个 "@s" 的「字面量(Literal)」分支来绕过选择器解析，
-        // 让小地图发出的 `/tp @s x y z` 可以作为普通文本被合法解析并执行。
+        // 重新注册无权限要求的原生命令。这会让客户端同步后知道这些命令是合法的。
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
-            com.mojang.brigadier.Command<CommandSourceStack> executeLoc = context -> {
-                CommandSourceStack source = context.getSource();
+            var executeLoc = (com.mojang.brigadier.Command<net.minecraft.commands.CommandSourceStack>) context -> {
+                net.minecraft.commands.CommandSourceStack source = context.getSource();
+                if (!checkAndConsumeTp(source)) return 0;
+                
                 Entity entity = source.getEntity();
                 if (entity != null) {
                     var pos = Vec3Argument.getCoordinates(context, "location").getPosition(source);
@@ -50,92 +54,83 @@ public class FuckFriends implements ModInitializer {
                 return 1;
             };
 
-            dispatcher.register(Commands.literal("tp")
-                .then(Commands.literal("@s")
-                    .then(Commands.argument("location", Vec3Argument.vec3()).executes(executeLoc))
-                )
-            );
-            dispatcher.register(Commands.literal("teleport")
-                .then(Commands.literal("@s")
-                    .then(Commands.argument("location", Vec3Argument.vec3()).executes(executeLoc))
-                )
-            );
-        });
+            var executeEnt = (com.mojang.brigadier.Command<net.minecraft.commands.CommandSourceStack>) context -> {
+                net.minecraft.commands.CommandSourceStack source = context.getSource();
+                if (!checkAndConsumeTp(source)) return 0;
+                
+                Entity targetEntity = EntityArgument.getEntity(context, "destination");
+                Entity entity = source.getEntity();
+                if (entity != null) {
+                    if (entity instanceof ServerPlayer sp) {
+                        sp.teleportTo((net.minecraft.server.level.ServerLevel) targetEntity.level(), targetEntity.getX(), targetEntity.getY(), targetEntity.getZ(), targetEntity.getYRot(), targetEntity.getXRot());
+                    } else {
+                        entity.teleportTo(targetEntity.getX(), targetEntity.getY(), targetEntity.getZ());
+                    }
+                }
+                return 1;
+            };
 
-        // 在服务器完全启动，所有命令树都合并完毕后，我们统一解锁权限，并套上次数限制器
-        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
-            try {
-                Field reqField = CommandNode.class.getDeclaredField("requirement");
-                reqField.setAccessible(true);
-
-                Field cmdField = CommandNode.class.getDeclaredField("command");
-                cmdField.setAccessible(true);
-
-                var dispatcher = server.getCommands().getDispatcher();
-                wrapNode(dispatcher.getRoot().getChild("tp"), reqField, cmdField);
-                wrapNode(dispatcher.getRoot().getChild("teleport"), reqField, cmdField);
-            } catch (Exception e) {
-                System.err.println("[FuckFriends] Failed to wrap tp command node:");
-                e.printStackTrace();
-            }
-        });
-
-        // 由于原版的 EntitySelectorParser 强制禁止非 OP 玩家解析任何 "@" 符号
-        // 为了欺骗客户端让它认为 @s 是一个合法的字面量，我们需要在这里重新注册字面量分支
-        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+            // 注册同名的 tp / teleport 节点，强制把 require 设为 true 使得所有人都能发起命令
             var tpNode = Commands.literal("tp")
                 .requires(source -> true)
-                .then(Commands.literal("@s")
-                    .then(Commands.argument("location", Vec3Argument.vec3())
-                        .executes(context -> {
-                            CommandSourceStack source = context.getSource();
-                            if (source.isPlayer()) {
-                                ServerPlayer player = source.getPlayerOrException();
-                                if (!source.hasPermission(2)) {
-                                    UUID uuid = player.getUUID();
-                                    int currentTpCount = tpCounts.getOrDefault(uuid, 0);
-
-                                    if (currentTpCount >= FuckFriendsConfig.getInstance().maxTpCount) {
-                                        player.sendSystemMessage(Component.literal(FuckFriendsConfig.getInstance().messageTpLimitReached));
-                                        return 0;
-                                    }
-                                    tpCounts.put(uuid, currentTpCount + 1);
-                                }
-                                var pos = Vec3Argument.getCoordinates(context, "location").getPosition(source);
-                                player.teleportTo(player.serverLevel(), pos.x, pos.y, pos.z, player.getYRot(), player.getXRot());
-                            }
-                            return 1;
-                        })
-                    )
-                );
+                .then(Commands.argument("location", Vec3Argument.vec3()).executes(executeLoc))
+                .then(Commands.argument("destination", EntityArgument.entity()).executes(executeEnt));
             dispatcher.register(tpNode);
 
             var teleportNode = Commands.literal("teleport")
                 .requires(source -> true)
-                .then(Commands.literal("@s")
-                    .then(Commands.argument("location", Vec3Argument.vec3())
-                        .executes(context -> {
-                            CommandSourceStack source = context.getSource();
-                            if (source.isPlayer()) {
-                                ServerPlayer player = source.getPlayerOrException();
-                                if (!source.hasPermission(2)) {
-                                    UUID uuid = player.getUUID();
-                                    int currentTpCount = tpCounts.getOrDefault(uuid, 0);
-
-                                    if (currentTpCount >= FuckFriendsConfig.getInstance().maxTpCount) {
-                                        player.sendSystemMessage(Component.literal(FuckFriendsConfig.getInstance().messageTpLimitReached));
-                                        return 0;
-                                    }
-                                    tpCounts.put(uuid, currentTpCount + 1);
-                                }
-                                var pos = Vec3Argument.getCoordinates(context, "location").getPosition(source);
-                                player.teleportTo(player.serverLevel(), pos.x, pos.y, pos.z, player.getYRot(), player.getXRot());
-                            }
-                            return 1;
-                        })
-                    )
-                );
+                .then(Commands.argument("location", Vec3Argument.vec3()).executes(executeLoc))
+                .then(Commands.argument("destination", EntityArgument.entity()).executes(executeEnt));
             dispatcher.register(teleportNode);
+        });
+
+        // 最底层的聊天/命令拦截器
+        // 用来捕获 Xaero 小地图发送的带有复杂参数的 /execute 命令或者其他小地图直接发送的字符
+        ServerMessageEvents.ALLOW_COMMAND_MESSAGE.register((message, source, params) -> {
+            ServerPlayer player = source.getPlayer();
+            if (player == null || player.server.getPlayerList().isOp(player.getGameProfile())) {
+                return true;
+            }
+
+            String cmd = message.signedContent();
+            
+            // 检查跨维度传送
+            Matcher execMatcher = EXECUTE_TP_PATTERN.matcher(cmd);
+            if (execMatcher.matches()) {
+                if (!checkAndConsumeTp(source)) return false;
+                
+                String dimensionId = execMatcher.group(1);
+                try {
+                    double x = Double.parseDouble(execMatcher.group(2));
+                    double y = Double.parseDouble(execMatcher.group(3));
+                    double z = Double.parseDouble(execMatcher.group(4));
+
+                    net.minecraft.resources.ResourceLocation dimLoc = net.minecraft.resources.ResourceLocation.parse(dimensionId);
+                    net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> targetDim = net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION, dimLoc);
+                    net.minecraft.server.level.ServerLevel targetLevel = player.server.getLevel(targetDim);
+                    
+                    if (targetLevel != null) {
+                        player.teleportTo(targetLevel, x, y, z, player.getYRot(), player.getXRot());
+                    }
+                } catch (Exception ignored) {}
+                return false; // 拦截掉原生 /execute 的解析，防止报没有权限
+            }
+
+            // 检查同维度的快捷传送（防范极端情况下客户端仍然红字的问题）
+            Matcher normalMatcher = NORMAL_TP_PATTERN.matcher(cmd);
+            if (normalMatcher.matches()) {
+                if (!checkAndConsumeTp(source)) return false;
+
+                try {
+                    double x = Double.parseDouble(normalMatcher.group(1));
+                    double y = Double.parseDouble(normalMatcher.group(2));
+                    double z = Double.parseDouble(normalMatcher.group(3));
+                    player.teleportTo(player.serverLevel(), x, y, z, player.getYRot(), player.getXRot());
+                } catch (Exception ignored) {}
+                return false;
+            }
+
+            return true;
         });
 
         ServerTickEvents.START_SERVER_TICK.register(server -> {
@@ -175,53 +170,21 @@ public class FuckFriends implements ModInitializer {
         });
     }
 
-    // 专用的命令执行外壳，用于拦截原生逻辑并加入次数校验
-    private static class LimitWrapper implements com.mojang.brigadier.Command<CommandSourceStack> {
-        private final com.mojang.brigadier.Command<CommandSourceStack> original;
+    private boolean checkAndConsumeTp(net.minecraft.commands.CommandSourceStack source) {
+        if (!source.hasPermission(2) && source.isPlayer()) {
+            ServerPlayer player = source.getPlayer();
+            if (player == null) return true;
+            
+            UUID uuid = player.getUUID();
+            int currentTpCount = tpCounts.getOrDefault(uuid, 0);
 
-        public LimitWrapper(com.mojang.brigadier.Command<CommandSourceStack> original) {
-            this.original = original;
-        }
-
-        @Override
-        public int run(com.mojang.brigadier.context.CommandContext<CommandSourceStack> context) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
-            CommandSourceStack source = context.getSource();
-            if (!source.hasPermission(2) && source.isPlayer()) {
-                ServerPlayer player = source.getPlayer();
-                UUID uuid = player.getUUID();
-                int currentTpCount = FuckFriends.tpCounts.getOrDefault(uuid, 0);
-
-                if (currentTpCount >= FuckFriendsConfig.getInstance().maxTpCount) {
-                    player.sendSystemMessage(Component.literal(FuckFriendsConfig.getInstance().messageTpLimitReached));
-                    return 0; // 拒绝执行
-                }
-                
-                int result = original.run(context);
-                if (result > 0) {
-                    FuckFriends.tpCounts.put(uuid, currentTpCount + 1); // 成功传送则次数+1
-                }
-                return result;
+            if (currentTpCount >= FuckFriendsConfig.getInstance().maxTpCount) {
+                player.sendSystemMessage(Component.literal(FuckFriendsConfig.getInstance().messageTpLimitReached));
+                return false;
             }
-            // OP 玩家直接放行
-            return original.run(context);
+            tpCounts.put(uuid, currentTpCount + 1);
         }
-    }
-
-    private static void wrapNode(CommandNode<CommandSourceStack> node, Field reqField, Field cmdField) throws IllegalAccessException {
-        if (node == null) return;
-        
-        // 暴力解锁节点权限，让客户端补全不标红
-        reqField.set(node, (Predicate<CommandSourceStack>) s -> true);
-        
-        com.mojang.brigadier.Command<CommandSourceStack> originalCmd = node.getCommand();
-        // 避免在 ServerLifecycle 触发多次时重复包裹
-        if (originalCmd != null && !(originalCmd instanceof LimitWrapper)) {
-            cmdField.set(node, new LimitWrapper(originalCmd));
-        }
-        
-        for (CommandNode<CommandSourceStack> child : node.getChildren()) {
-            wrapNode(child, reqField, cmdField);
-        }
+        return true;
     }
 
     private void resetLimits(MinecraftServer server) {
