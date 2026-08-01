@@ -17,6 +17,7 @@ public class FuckFriendsConfig {
     public String messageReset = "§a传送和死亡限制已重置!";
     public String messageTpLimitReached = "§c你到达了传送上限!";
     public String messageSpectatorMode = "§c你到达了死亡上限!";
+    public String messageUnsafeTpDenied = "§c你只能将其他玩家传送到自己身边。";
     public String actionbarSpectatorTime = "§e重生时间: %02d:%02d";
     
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -33,10 +34,13 @@ public class FuckFriendsConfig {
     public static void loadConfig() {
         if (CONFIG_FILE.exists()) {
             try (FileReader reader = new FileReader(CONFIG_FILE)) {
-                instance = GSON.fromJson(reader, FuckFriendsConfig.class);
-            } catch (IOException e) {
+                FuckFriendsConfig loaded = GSON.fromJson(reader, FuckFriendsConfig.class);
+                instance = loaded == null ? new FuckFriendsConfig() : loaded;
+                instance.validate();
+            } catch (RuntimeException | IOException e) {
                 e.printStackTrace();
                 instance = new FuckFriendsConfig();
+                saveConfig();
             }
         } else {
             instance = new FuckFriendsConfig();
@@ -50,5 +54,36 @@ public class FuckFriendsConfig {
         } catch (IOException e) {
             e.printStackTrace();
         }
+    }
+
+    public String formatSpectatorTime(long minutes, long seconds) {
+        try {
+            return String.format(actionbarSpectatorTime, minutes, seconds);
+        } catch (RuntimeException e) {
+            return String.format("§e重生时间: %02d:%02d", minutes, seconds);
+        }
+    }
+
+    private void validate() {
+        resetIntervalTicks = Math.max(20, resetIntervalTicks);
+        maxTpCount = Math.max(0, maxTpCount);
+        maxDeathCount = Math.max(0, maxDeathCount);
+
+        FuckFriendsConfig defaults = new FuckFriendsConfig();
+        messageReset = valueOrDefault(messageReset, defaults.messageReset);
+        messageTpLimitReached = valueOrDefault(messageTpLimitReached, defaults.messageTpLimitReached);
+        messageSpectatorMode = valueOrDefault(messageSpectatorMode, defaults.messageSpectatorMode);
+        messageUnsafeTpDenied = valueOrDefault(messageUnsafeTpDenied, defaults.messageUnsafeTpDenied);
+        actionbarSpectatorTime = valueOrDefault(actionbarSpectatorTime, defaults.actionbarSpectatorTime);
+
+        try {
+            String.format(actionbarSpectatorTime, 0L, 0L);
+        } catch (RuntimeException e) {
+            actionbarSpectatorTime = defaults.actionbarSpectatorTime;
+        }
+    }
+
+    private static String valueOrDefault(String value, String fallback) {
+        return value == null ? fallback : value;
     }
 }
