@@ -16,6 +16,7 @@ Oh, and this README was also written by AI, I just modified it a bit (facepalm).
 
 ### ✨ Core Features (OPs ignore these limits)
 - **TP Limit & Xaero's Minimap Compatibility**: Grants regular players permission to use the `/tp` command and is compatible with Xaero's Minimap teleportation requests. However, teleportations are strictly limited (default is 6 times per cycle).
+- **Safe Player Teleport Rules**: Regular players may teleport themselves freely or teleport another player to themselves, but cannot force another player to arbitrary coordinates or to a third player.
 - **Death Penalty (Spectator Mode)**: If a player dies too many times within a cycle (defaults to more than 2 deaths, meaning upon the 3rd death), they will be forcibly switched to Spectator Mode until the next reset cycle.
 - **Dynamic Countdown Display**: Players serving the death penalty (in Spectator Mode) will see a real-time countdown timer above their hotbar (Actionbar) indicating the time until revival.
 - **Global Reset Cycle**: The cycle is set to 10 minutes (configurable) and is based on absolute world time. Restarting the server won't reset the timer itself, but it will refresh everyone's available TP and Death counts.
