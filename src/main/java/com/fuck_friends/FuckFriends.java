@@ -9,6 +9,7 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import com.mojang.brigadier.tree.CommandNode;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.coordinates.Vec3Argument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -21,8 +22,14 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 public class FuckFriends implements ModInitializer {
+    private static final Pattern ALLOWED_EXECUTE_TP = Pattern.compile(
+        "^execute\\s+in\\s+[a-z0-9_.-]+:[a-z0-9_./-]+\\s+run\\s+(?:tp|teleport)\\s+@s\\s+"
+            + "(?:~?(?:-?\\d+(?:\\.\\d+)?)?\\s+){2}~?(?:-?\\d+(?:\\.\\d+)?)?$",
+        Pattern.CASE_INSENSITIVE
+    );
 
     public static final Map<UUID, Integer> tpCounts = new HashMap<>();
     public static final Map<UUID, Integer> deathCounts = new HashMap<>();
@@ -120,7 +127,7 @@ public class FuckFriends implements ModInitializer {
                     long minutes = remainingSeconds / 60;
                     long seconds = remainingSeconds % 60;
                     
-                    String actionBarText = String.format(FuckFriendsConfig.getInstance().actionbarSpectatorTime, minutes, seconds);
+                    String actionBarText = FuckFriendsConfig.getInstance().formatSpectatorTime(minutes, seconds);
                     player.displayClientMessage(Component.literal(actionBarText), true);
                 }
             }
@@ -156,6 +163,18 @@ public class FuckFriends implements ModInitializer {
             if (!source.hasPermission(2) && source.isPlayer()) {
                 ServerPlayer player = source.getPlayer();
                 if (player != null) {
+                    String commandInput = context.getInput();
+                    if (commandInput.regionMatches(true, 0, "execute", 0, 7)
+                        && !ALLOWED_EXECUTE_TP.matcher(commandInput).matches()) {
+                        player.sendSystemMessage(Component.literal(FuckFriendsConfig.getInstance().messageUnsafeTpDenied));
+                        return 0;
+                    }
+
+                    if (!isAllowedTeleport(context, player)) {
+                        player.sendSystemMessage(Component.literal(FuckFriendsConfig.getInstance().messageUnsafeTpDenied));
+                        return 0;
+                    }
+
                     UUID uuid = player.getUUID();
                     int currentTpCount = FuckFriends.tpCounts.getOrDefault(uuid, 0);
 
@@ -173,6 +192,42 @@ public class FuckFriends implements ModInitializer {
             }
             // OP 玩家或者非玩家实体直接放行
             return original.run(context);
+        }
+    }
+
+    private static boolean isAllowedTeleport(
+        com.mojang.brigadier.context.CommandContext<CommandSourceStack> context,
+        ServerPlayer sourcePlayer
+    ) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        java.util.Collection<? extends Entity> targets = getTargets(context);
+        if (targets == null || targets.stream().allMatch(sourcePlayer::equals)) {
+            return true;
+        }
+
+        // Another entity may only be teleported to the player issuing the command.
+        Entity destination = getDestination(context);
+        return destination != null && destination.equals(sourcePlayer);
+    }
+
+    private static java.util.Collection<? extends Entity> getTargets(
+        com.mojang.brigadier.context.CommandContext<CommandSourceStack> context
+    ) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        try {
+            context.getArgument("targets", net.minecraft.commands.arguments.selector.EntitySelector.class);
+            return EntityArgument.getEntities(context, "targets");
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    private static Entity getDestination(
+        com.mojang.brigadier.context.CommandContext<CommandSourceStack> context
+    ) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        try {
+            context.getArgument("destination", net.minecraft.commands.arguments.selector.EntitySelector.class);
+            return EntityArgument.getEntity(context, "destination");
+        } catch (IllegalArgumentException ignored) {
+            return null;
         }
     }
 
